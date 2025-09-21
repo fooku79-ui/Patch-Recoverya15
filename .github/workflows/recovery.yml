@@ -28,7 +28,8 @@ jobs:
         chmod +x magiskboot
         
         # Download avbtool
-        wget https://android.googlesource.com/platform/external/avb/+/master/avbtool.py?format=TEXT | base64 -d > avbtool
+        wget "https://android.googlesource.com/platform/external/avb/+/master/avbtool.py?format=TEXT" -O avbtool_b64
+        base64 -d avbtool_b64 > avbtool
         chmod +x avbtool
         
         # Create signing key
