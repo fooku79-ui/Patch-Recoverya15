@@ -1,4 +1,4 @@
-name: Patch Recovery
+name: Patch Recovery (Single-File, Self-Contained)
 
 on:
   workflow_dispatch:
@@ -32,7 +32,70 @@ jobs:
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            git curl file xz-utils zstd gzip lz4 cpio unzip
+            git curl file xz-utils zstd gzip lz4 cpio unzip python3 tar
+
+      - name: Create helper scripts (inline)
+        run: |
+          set -euxo pipefail
+          mkdir -p scripts
+
+          # validate.sh
+          cat > scripts/validate.sh << 'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          : "${RECOVERY_IMG:?missing RECOVERY_IMG}"
+          echo "🔍 validate.sh: checking $RECOVERY_IMG"
+          file "$RECOVERY_IMG" || true
+          if ! strings "$RECOVERY_IMG" | grep -qi -e ANDROID -e SEANDROID -e "ANDROID!"; then
+            echo "❌ Not detecting Android boot image magic in $RECOVERY_IMG"
+            exit 1
+          fi
+          echo "✅ validate.sh: basic checks passed"
+          EOF
+          chmod +x scripts/validate.sh
+
+          # patch.sh
+          cat > scripts/patch.sh << 'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          : "${WORK_DIR:?missing WORK_DIR}"
+          tag_dir() {
+            local d="$1"
+            [ -d "$d" ] || return 0
+            mkdir -p "$d/etc" || true
+            {
+              echo "patched_by=github_actions"
+              echo "patched_at=$(date -u +%FT%TZ)"
+            } > "$d/etc/recovery_patch.meta"
+          }
+          neuter_restore() {
+            local d="$1"
+            [ -d "$d" ] || return 0
+            for f in "$d"/{sbin,bin,etc}/install-recovery.sh "$d"/{sbin,bin,etc}/recovery-from-boot.p; do
+              [ -f "$f" ] || continue
+              mv -f "$f" "$f.disabled"
+            done
+            # Also rewrite references in init scripts if present
+            grep -RIl -e "install-recovery.sh" -e "recovery-from-boot.p" "$d" 2>/dev/null | while read -r f; do
+              sed -i 's/install-recovery\.sh/install-recovery.sh.disabled/g' "$f" || true
+              sed -i 's/recovery-from-boot\.p/recovery-from-boot.p.disabled/g' "$f" || true
+            done
+          }
+          permissify() {
+            local d="$1"
+            [ -d "$d" ] || return 0
+            find "$d" -type f -name "*.sh" -exec chmod 0755 {} + || true
+            [ -d "$d/sbin" ] && chmod 0755 "$d/sbin"/* 2>/dev/null || true
+          }
+          for D in "$WORK_DIR/ramdisk" "$WORK_DIR/vendor_ramdisk"; do
+            [ -d "$D" ] || continue
+            tag_dir "$D"
+            neuter_restore "$D"
+            permissify "$D"
+          done
+          echo "✅ patch.sh: done"
+          EOF
+          chmod +x scripts/patch.sh
 
       - name: Fetch Android Image Kitchen
         run: |
@@ -45,6 +108,7 @@ jobs:
           set -euxo pipefail
           mkdir -p "$WORK_DIR" "$OUT_DIR"
           URL="${{ inputs.recovery_url }}"
+          echo "Downloading: $URL"
           curl -fL "$URL" -o input.bin
           case "$URL" in
             *.img)       mv input.bin "$RECOVERY_IMG" ;;
@@ -59,19 +123,20 @@ jobs:
       - name: Sanity check image
         run: |
           set -euxo pipefail
-          file "$RECOVERY_IMG" || true
-          if ! strings "$RECOVERY_IMG" | grep -qi -e ANDROID -e SEANDROID -e "ANDROID!"; then
-            echo "Not seeing Android boot image magic; aborting."
-            exit 1
-          fi
-          echo "Looks like an Android recovery image."
+          RECOVERY_IMG="${{ env.RECOVERY_IMG }}" scripts/validate.sh
 
       - name: Unpack
         run: |
           set -euxo pipefail
           cp "$RECOVERY_IMG" "$WORK_DIR/recovery.img"
           bash AIK/unpackimg.sh "$WORK_DIR/recovery.img"
+          echo "Contents:"
           ls -al "$WORK_DIR" || true
+
+      - name: Patch (neutralize stock-restore, fix perms)
+        run: |
+          set -euxo pipefail
+          WORK_DIR="${{ env.WORK_DIR }}" scripts/patch.sh
 
       - name: Repack
         run: |
@@ -83,9 +148,20 @@ jobs:
           mv "$WORK_DIR/image-new.img" "$OUT_DIR/${{ inputs.output_name }}"
           sha256sum "$OUT_DIR/${{ inputs.output_name }}" | tee "$OUT_DIR/${{ inputs.output_name }}.sha256"
 
+      - name: Optional Odin tar.md5 wrapper
+        run: |
+          set -euxo pipefail
+          pushd "$OUT_DIR"
+          cp "${{ inputs.output_name }}" recovery.img
+          tar -H ustar -c recovery.img > recovery.tar
+          md5sum -t recovery.tar | sed 's/ .*//' >> recovery.tar
+          mv recovery.tar recovery.tar.md5
+          popd
+          ls -lh "$OUT_DIR"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: recovery-patched
+          name: patched-recovery
           path: ${{ env.OUT_DIR }}/
           if-no-files-found: error
