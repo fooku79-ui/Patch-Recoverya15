@@ -3,12 +3,12 @@ name: Patch Recovery
 on:
   workflow_dispatch:
     inputs:
-      RECOVERY_URL:
-        description: "Direct HTTPS URL to recovery image (.img/.img.lz4/.img.gz/.img.xz/.img.zst)"
+      recovery_url:
+        description: "Direct URL to recovery image (.img/.img.gz/.img.xz/.img.zst/.img.lz4)"
         required: true
         type: string
-      OUTPUT_NAME:
-        description: "Output filename (e.g., recovery_patched.img)"
+      output_name:
+        description: "Output filename"
         required: false
         default: "recovery_patched.img"
         type: string
@@ -19,8 +19,8 @@ jobs:
     timeout-minutes: 25
 
     env:
-      OUT_DIR: ${{ github.workspace }}/out
       WORK_DIR: ${{ github.workspace }}/work
+      OUT_DIR: ${{ github.workspace }}/out
       RECOVERY_IMG: ${{ github.workspace }}/recovery.img
 
     steps:
@@ -32,44 +32,19 @@ jobs:
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            curl file xz-utils zstd gzip lz4 cpio unzip git python3
+            git curl file xz-utils zstd gzip lz4 cpio unzip
 
-      - name: Make bundled tools executable (repo root)
+      - name: Fetch Android Image Kitchen
         run: |
           set -euxo pipefail
-          # If you keep tools in the repo root, this makes them runnable
-          if [ -f ./magiskboot ]; then chmod +x ./magiskboot; fi
-          if [ -f ./avbtool ]; then chmod +x ./avbtool; fi
-          if [ -f ./script1.sh ]; then chmod +x ./script1.sh; fi
-          if [ -f ./script2.sh ]; then chmod +x ./script2.sh; fi
-
-      - name: Fallback: fetch Android Image Kitchen if magiskboot missing
-        run: |
-          set -euxo pipefail
-          if ! [ -x ./magiskboot ]; then
-            git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen AIK
-            cp AIK/AIK-Linux/bin/magiskboot ./magiskboot
-            chmod +x ./magiskboot
-          fi
-
-      - name: Fallback: fetch avbtool if missing
-        run: |
-          set -euxo pipefail
-          if ! [ -x ./avbtool ]; then
-            curl -fL -o avbtool.py \
-              "https://raw.githubusercontent.com/LineageOS/android_external_avb/lineage-20/avbtool.py"
-            mv avbtool.py avbtool
-            chmod +x ./avbtool
-          fi
-          ./magiskboot --help >/dev/null
-          ./avbtool --help >/dev/null
+          git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen AIK
+          echo "Using AIK at $PWD/AIK"
 
       - name: Download recovery image
         run: |
           set -euxo pipefail
-          mkdir -p "$OUT_DIR" "$WORK_DIR"
-          URL="${{ inputs.RECOVERY_URL }}"
-          echo "Downloading: $URL"
+          mkdir -p "$WORK_DIR" "$OUT_DIR"
+          URL="${{ inputs.recovery_url }}"
           curl -fL "$URL" -o input.bin
           case "$URL" in
             *.img)       mv input.bin "$RECOVERY_IMG" ;;
@@ -86,78 +61,31 @@ jobs:
           set -euxo pipefail
           file "$RECOVERY_IMG" || true
           if ! strings "$RECOVERY_IMG" | grep -qi -e ANDROID -e SEANDROID -e "ANDROID!"; then
-            echo "Not seeing Android boot header magic; refusing to continue."
+            echo "Not seeing Android boot image magic; aborting."
             exit 1
           fi
-          echo "Looks like a valid Android recovery image."
+          echo "Looks like an Android recovery image."
 
-      - name: Unpack with AIK (best-effort)
+      - name: Unpack
         run: |
           set -euxo pipefail
-          # Prefer repo-bundled AIK layout if present
-          if [ -d AIK ]; then
-            AIK_DIR="$PWD/AIK"
-          else
-            git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen AIK
-            AIK_DIR="$PWD/AIK"
-          fi
-          echo "Using AIK at $AIK_DIR"
           cp "$RECOVERY_IMG" "$WORK_DIR/recovery.img"
-          bash "$AIK_DIR/unpackimg.sh" "$WORK_DIR/recovery.img" || true
+          bash AIK/unpackimg.sh "$WORK_DIR/recovery.img"
           ls -al "$WORK_DIR" || true
 
-      - name: Optional custom patch (script1.sh)
-        if: ${{ hashFiles('script1.sh') != '' }}
+      - name: Repack
         run: |
           set -euxo pipefail
-          export WORK_DIR="${{ env.WORK_DIR }}"
-          export RECOVERY_IMG="${{ env.RECOVERY_IMG }}"
-          ./script1.sh
-
-      - name: Optional custom patch (script2.sh)
-        if: ${{ hashFiles('script2.sh') != '' }}
-        run: |
-          set -euxo pipefail
-          export WORK_DIR="${{ env.WORK_DIR }}"
-          export RECOVERY_IMG="${{ env.RECOVERY_IMG }}"
-          ./script2.sh
-
-      - name: Repack with AIK if it unpacked
-        run: |
-          set -euxo pipefail
-          if [ -d AIK ]; then
-            AIK_DIR="$PWD/AIK"
-            pushd "$WORK_DIR" >/dev/null || true
-            # repackimg.sh outputs image-new.img when successful
-            bash "$AIK_DIR/repackimg.sh" || true
-            popd >/dev/null || true
-            if [ -f "$WORK_DIR/image-new.img" ]; then
-              mv "$WORK_DIR/image-new.img" "$OUT_DIR/${{ inputs.OUTPUT_NAME }}"
-            else
-              # No repack output; fall back to original with a suffix so you have something to inspect
-              cp "$RECOVERY_IMG" "$OUT_DIR/${{ inputs.OUTPUT_NAME }}"
-            fi
-          else
-            # Fallback: just copy through if AIK failed entirely
-            cp "$RECOVERY_IMG" "$OUT_DIR/${{ inputs.OUTPUT_NAME }}"
-          fi
-          sha256sum "$OUT_DIR/${{ inputs.OUTPUT_NAME }}" | tee "$OUT_DIR/${{ inputs.OUTPUT_NAME }}.sha256"
-
-      - name: Wrap to Odin .tar.md5 (optional)
-        run: |
-          set -euxo pipefail
-          pushd "$OUT_DIR"
-          cp "${{ inputs.OUTPUT_NAME }}" recovery.img
-          tar -H ustar -c recovery.img > recovery.tar
-          md5sum -t recovery.tar | sed 's/ .*//' >> recovery.tar
-          mv recovery.tar recovery.tar.md5
-          popd
-          ls -lh "$OUT_DIR"
+          pushd "$WORK_DIR" >/dev/null
+          bash ../AIK/repackimg.sh
+          popd >/dev/null
+          test -f "$WORK_DIR/image-new.img"
+          mv "$WORK_DIR/image-new.img" "$OUT_DIR/${{ inputs.output_name }}"
+          sha256sum "$OUT_DIR/${{ inputs.output_name }}" | tee "$OUT_DIR/${{ inputs.output_name }}.sha256"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: patched-recovery
-          path: |
-            ${{ env.OUT_DIR }}/
+          name: recovery-patched
+          path: ${{ env.OUT_DIR }}/
           if-no-files-found: error
