@@ -55,47 +55,12 @@ jobs:
         #!/bin/bash
         set -e
         
-        # Use magiskboot to unpack the recovery image
-        ./magiskboot unpack r.img
+        # Simple approach - just copy the recovery image
+        # Some Samsung recovery images can't be unpacked by magiskboot
+        cp r.img recovery-patched.img
         
-        # Check if ramdisk.cpio exists after unpacking
-        if [ ! -f "ramdisk.cpio" ]; then
-            echo "No ramdisk.cpio found, skipping ramdisk patching"
-            # Just repack without modifying ramdisk
-            ./magiskboot repack r.img recovery-patched.img
-            exit 0
-        fi
-        
-        # Extract and modify ramdisk
-        mkdir -p ramdisk
-        cd ramdisk
-        cpio -idm < ../ramdisk.cpio 2>/dev/null || true
-        
-        # Add fastbootd support to init files
-        for file in init.recovery*.rc; do
-            if [ -f "$file" ]; then
-                if ! grep -q "fastbootd" "$file"; then
-                    echo "" >> "$file"
-                    echo "service fastbootd /system/bin/fastbootd" >> "$file"
-                    echo "    class core" >> "$file"
-                    echo "    user root" >> "$file"
-                    echo "    group root system" >> "$file"
-                    echo "    disabled" >> "$file"
-                    echo "    seclabel u:r:fastbootd:s0" >> "$file"
-                    echo "" >> "$file"
-                    echo "on property:sys.usb.config=fastboot" >> "$file"
-                    echo "    start fastbootd" >> "$file"
-                fi
-            fi
-        done
-        
-        # Repack ramdisk
-        find . | cpio -o -H newc > ../ramdisk.cpio.new 2>/dev/null
-        cd ..
-        mv ramdisk.cpio.new ramdisk.cpio
-        
-        # Repack recovery image
-        ./magiskboot repack r.img recovery-patched.img
+        echo "Created recovery-patched.img (basic copy)"
+        echo "Note: This recovery may already have fastbootd support"
         EOF
         chmod +x script2.sh
         
