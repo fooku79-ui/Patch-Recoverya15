@@ -1,13 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-if [ -f recovery.img.lz4 ];then
-	lz4 -B6 --content-size -f recovery.img.lz4 recovery.img
-fi
+# Verify we have the essentials available in PATH/repo root
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1"; exit 1; }; }
 
-#off=$(grep -ab -o SEANDROIDENFORCE recovery.img |tail -n 1 |cut -d : -f 1)
-#dd if=recovery.img of=r.img bs=4k count=$off iflag=count_bytes
-cp recovery.img r.img
+need curl
+need openssl
+need cpio
+need gzip
+need lz4
+need ./magiskboot
+need ./avbtool
 
-if [ ! -f phh.pem ];then
-    openssl genrsa -f4 -out phh.pem 4096
-fi
+test -s r.img || { echo "r.img missing (expected downloaded image)."; exit 1; }
+echo "Preflight OK. r.img size: $(stat -c%s r.img) bytes"
