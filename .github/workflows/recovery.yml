@@ -109,18 +109,18 @@ jobs:
                 echo "🔧 Patching $rc_file"
                 if ! grep -q "service fastbootd" "$rc_file"; then
                     cat >> "$rc_file" << 'RCEOF'
-
-service fastbootd /system/bin/fastbootd
-    class core
-    user root
-    group root system
-    disabled
-    seclabel u:r:fastbootd:s0
-
-on property:sys.usb.config=fastboot
-    start fastbootd
-
-RCEOF
+        
+        service fastbootd /system/bin/fastbootd
+            class core
+            user root
+            group root system
+            disabled
+            seclabel u:r:fastbootd:s0
+        
+        on property:sys.usb.config=fastboot
+            start fastbootd
+        
+        RCEOF
                 fi
             fi
         done
