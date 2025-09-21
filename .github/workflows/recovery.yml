@@ -11,10 +11,6 @@ on:
         description: 'Samsung device model (e.g., SM-A515F)'
         required: true
         type: string
-      android_version:
-        description: 'Android version (e.g., 11, 12, 13)'
-        required: true
-        type: string
 
 jobs:
   patch-recovery:
@@ -24,30 +20,16 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
-        
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y python3-pip wget curl unzip lz4 xz-utils
-        pip3 install --upgrade pip
+        sudo apt-get install -y wget curl unzip lz4 xz-utils xxd
         
     - name: Download and setup tools
       run: |
-        # Download Magisk tools
         wget https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk-v26.4.zip -O magisk.zip
         unzip magisk.zip
         chmod +x magiskboot
-        
-        # Download avbtool
-        wget https://android.googlesource.com/platform/external/avb/+archive/master.tar.gz -O avb.tar.gz
-        tar -xzf avb.tar.gz
-        chmod +x avbtool
-        
-        # Create scripts directory
         mkdir -p scripts
         
     - name: Create validation script
@@ -57,7 +39,6 @@ jobs:
         set -euo pipefail
         
         RECOVERY_IMG="$1"
-        
         echo "🔍 validate.sh: checking $RECOVERY_IMG"
         
         if [ ! -f "$RECOVERY_IMG" ]; then
@@ -65,20 +46,6 @@ jobs:
             exit 1
         fi
         
-        # Check file size (should be reasonable for recovery image)
-        SIZE=$(stat -c%s "$RECOVERY_IMG")
-        if [ "$SIZE" -lt 10000000 ]; then  # Less than 10MB is suspicious
-            echo "⚠️  Warning: File size is only $SIZE bytes, seems small for recovery image"
-        fi
-        
-        # Check for Android boot image magic
-        MAGIC=$(xxd -l 8 -p "$RECOVERY_IMG" 2>/dev/null || true)
-        if [[ "$MAGIC" == "414e44524f494421" ]]; then
-            echo "✅ Found Android boot image magic (ANDROID!)"
-            return 0
-        fi
-        
-        # Check for compressed formats
         FILE_TYPE=$(file "$RECOVERY_IMG")
         echo "File type: $FILE_TYPE"
         
@@ -86,44 +53,30 @@ jobs:
             echo "🔧 Detected LZ4 compressed file, decompressing..."
             lz4 -d "$RECOVERY_IMG" "${RECOVERY_IMG}.decompressed"
             mv "${RECOVERY_IMG}.decompressed" "$RECOVERY_IMG"
-            # Re-check after decompression
-            MAGIC=$(xxd -l 8 -p "$RECOVERY_IMG" 2>/dev/null || true)
-            if [[ "$MAGIC" == "414e44524f494421" ]]; then
-                echo "✅ Found Android boot image magic after decompression"
-                return 0
-            fi
         fi
         
         if [[ "$FILE_TYPE" == *"XZ"* ]] || [[ "$FILE_TYPE" == *"LZMA"* ]]; then
             echo "🔧 Detected XZ/LZMA compressed file, decompressing..."
             xz -d "$RECOVERY_IMG"
-            # Re-check after decompression
-            MAGIC=$(xxd -l 8 -p "$RECOVERY_IMG" 2>/dev/null || true)
-            if [[ "$MAGIC" == "414e44524f494421" ]]; then
-                echo "✅ Found Android boot image magic after decompression"
-                return 0
-            fi
         fi
         
         if [[ "$FILE_TYPE" == *"gzip"* ]]; then
             echo "🔧 Detected gzip compressed file, decompressing..."
             gunzip "$RECOVERY_IMG"
-            # Re-check after decompression
-            MAGIC=$(xxd -l 8 -p "$RECOVERY_IMG" 2>/dev/null || true)
-            if [[ "$MAGIC" == "414e44524f494421" ]]; then
-                echo "✅ Found Android boot image magic after decompression"
-                return 0
-            fi
         fi
         
-        # If we get here, it's not a valid Android boot image
+        MAGIC=$(xxd -l 8 -p "$RECOVERY_IMG" 2>/dev/null || true)
+        if [[ "$MAGIC" == "414e44524f494421" ]]; then
+            echo "✅ Found Android boot image magic (ANDROID!)"
+            exit 0
+        fi
+        
         echo "❌ Not detecting Android boot image magic in $RECOVERY_IMG"
         echo "Magic bytes found: $MAGIC (expected: 414e44524f494421)"
         echo "First 32 bytes of file:"
         xxd -l 32 "$RECOVERY_IMG" || true
         exit 1
         EOF
-        
         chmod +x scripts/validate.sh
         
     - name: Create patch script
@@ -136,38 +89,24 @@ jobs:
         OUTPUT_DIR="output"
         
         echo "🔧 patch.sh: patching $RECOVERY_IMG"
-        
-        # Create output directory
         mkdir -p "$OUTPUT_DIR"
         
-        # Extract the boot image
-        echo "📦 Extracting boot image..."
         ./magiskboot unpack "$RECOVERY_IMG"
         
-        # Check if ramdisk exists
         if [ ! -f "ramdisk.cpio" ]; then
             echo "❌ ramdisk.cpio not found after unpacking"
             exit 1
         fi
         
-        # Extract ramdisk
-        echo "📦 Extracting ramdisk..."
         mkdir -p ramdisk
         cd ramdisk
         cpio -idm < ../ramdisk.cpio
         
-        # Patch the recovery for fastbootd support
-        echo "🔧 Patching for fastbootd support..."
-        
-        # Create fastbootd binary directory if it doesn't exist
         mkdir -p system/bin
         
-        # Add fastbootd support to init.recovery.*.rc files
         for rc_file in *.rc; do
             if [ -f "$rc_file" ]; then
                 echo "🔧 Patching $rc_file"
-                
-                # Add fastbootd service if not already present
                 if ! grep -q "service fastbootd" "$rc_file"; then
                     cat >> "$rc_file" << 'RCEOF'
 
@@ -181,24 +120,14 @@ service fastbootd /system/bin/fastbootd
 on property:sys.usb.config=fastboot
     start fastbootd
 
-on property:sys.usb.ffs.ready=1 && property:sys.usb.config=fastboot
-    write /sys/class/android_usb/android0/enable 0
-    write /sys/class/android_usb/android0/idVendor 18d1
-    write /sys/class/android_usb/android0/idProduct d00d
-    write /sys/class/android_usb/android0/functions fastboot
-    write /sys/class/android_usb/android0/enable 1
-
 RCEOF
                 fi
             fi
         done
         
-        # Patch fstab files for dynamic partitions
         for fstab_file in fstab.*; do
             if [ -f "$fstab_file" ]; then
                 echo "🔧 Patching $fstab_file for dynamic partitions"
-                
-                # Add logical partition entries if not present
                 if ! grep -q "system.*logical" "$fstab_file"; then
                     echo "/dev/block/mapper/system /system ext4 ro,barrier=1,discard wait,logical,first_stage_mount" >> "$fstab_file"
                 fi
@@ -211,29 +140,15 @@ RCEOF
             fi
         done
         
-        # Repack ramdisk
-        echo "📦 Repacking ramdisk..."
         find . | cpio -o -H newc > ../ramdisk.cpio.new
         cd ..
         mv ramdisk.cpio.new ramdisk.cpio
         
-        # Repack the boot image
-        echo "📦 Repacking boot image..."
         ./magiskboot repack "$RECOVERY_IMG" "$OUTPUT_DIR/recovery-patched.img"
         
-        # Verify the patched image
-        echo "✅ Verifying patched image..."
         if [ -f "$OUTPUT_DIR/recovery-patched.img" ]; then
             SIZE=$(stat -c%s "$OUTPUT_DIR/recovery-patched.img")
             echo "✅ Patched recovery created: $SIZE bytes"
-            
-            # Quick validation
-            MAGIC=$(xxd -l 8 -p "$OUTPUT_DIR/recovery-patched.img" 2>/dev/null || true)
-            if [[ "$MAGIC" == "414e44524f494421" ]]; then
-                echo "✅ Patched image has valid Android boot magic"
-            else
-                echo "⚠️  Warning: Patched image may not have valid boot magic"
-            fi
         else
             echo "❌ Failed to create patched recovery"
             exit 1
@@ -241,15 +156,12 @@ RCEOF
         
         echo "🎉 Patching completed successfully!"
         EOF
-        
         chmod +x scripts/patch.sh
         
     - name: Download recovery image
       run: |
         echo "⬇️ Downloading recovery image from: ${{ github.event.inputs.recovery_url }}"
         wget "${{ github.event.inputs.recovery_url }}" -O recovery.img
-        
-        echo "📊 Downloaded file info:"
         ls -lh recovery.img
         file recovery.img
         
@@ -266,45 +178,6 @@ RCEOF
     - name: Upload patched recovery
       uses: actions/upload-artifact@v4
       with:
-        name: patched-recovery-${{ github.event.inputs.device_model }}-android${{ github.event.inputs.android_version }}
+        name: patched-recovery-${{ github.event.inputs.device_model }}
         path: output/recovery-patched.img
-        retention-days: 30
-        
-    - name: Create release info
-      run: |
-        cat > release-info.txt << EOF
-        # Patched Recovery Image
-        
-        **Device Model:** ${{ github.event.inputs.device_model }}
-        **Android Version:** ${{ github.event.inputs.android_version }}
-        **Original Recovery URL:** ${{ github.event.inputs.recovery_url }}
-        **Patch Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-        
-        ## What was patched:
-        - Added fastbootd support for dynamic partition flashing
-        - Modified init.recovery.*.rc files to include fastbootd service
-        - Updated fstab files for logical/dynamic partition support
-        - Enabled fastboot mode switching
-        
-        ## How to flash:
-        1. Boot into download mode
-        2. Flash with Odin: AP slot -> recovery-patched.img
-        3. Or use fastboot: \`fastboot flash recovery recovery-patched.img\`
-        
-        ## Testing fastbootd:
-        1. Boot to recovery
-        2. Select "Enter fastboot mode" or use \`adb reboot fastboot\`
-        3. Verify with \`fastboot devices\`
-        4. Test dynamic partition commands:
-           - \`fastboot getvar is-logical:system\`
-           - \`fastboot flash system system.img\`
-        
-        **Warning:** Flash at your own risk. Ensure you have original recovery backup.
-        EOF
-        
-    - name: Upload release info
-      uses: actions/upload-artifact@v4
-      with:
-        name: release-info-${{ github.event.inputs.device_model }}
-        path: release-info.txt
         retention-days: 30
