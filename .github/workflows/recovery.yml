@@ -79,6 +79,41 @@ jobs:
           chmod +x script1.sh script2.sh avbtool magiskboot
 
       - name: Step 1 – preflight
+        run: ./script1.sh
+
+      - name: Step 2 – unpack, patch, repack, AVB
+        env:
+          PARTITION_NAME: ${{ inputs.PARTITION_NAME }}
+          PARTITION_SIZE: ${{ inputs.PARTITION_SIZE }}
+        run: ./script2.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-image
+          path: |
+            recovery-patched.img
+            phh.pub.bin
+          if-no-files-found: error
+          test -s "$OUT"
+          cp -f "$OUT" r.img
+          echo "Downloaded $(stat -c%s r.img) bytes"
+          file r.img || true
+          hexdump -C -n 8 r.img | head -n1 || true
+
+      - name: Generate signing key (phh.pem)
+        run: |
+          set -euxo pipefail
+          if [ ! -f phh.pem ]; then
+            openssl genrsa -f4 -out phh.pem 4096
+          fi
+
+      - name: Make scripts executable
+        run: |
+          set -euxo pipefail
+          chmod +x script1.sh script2.sh avbtool magiskboot
+
+      - name: Step 1 – preflight
         run: |
           set -euxo pipefail
           ./script1.sh
