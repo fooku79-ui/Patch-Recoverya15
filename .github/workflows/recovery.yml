@@ -1,27 +1,24 @@
-name: Patch Recovery (clean)
+name: Patch Recovery (fixed)
 
 on:
   workflow_dispatch:
     inputs:
       IMAGE_URL:
-        description: "HTTP/HTTPS URL to recovery/vendor_boot image (fresh signed link)"
+        description: "Fresh signed HTTPS link to recovery/vendor_boot image"
         required: true
       PARTITION_NAME:
         description: "Partition for AVB footer (recovery or vendor_boot)"
-        required: false
         default: "recovery"
       PARTITION_SIZE:
         description: "Exact partition size in bytes (optional). Leave blank to auto-round."
-        required: false
       IMAGE_FILENAME:
         description: "Save-as filename (recovery.img or vendor_boot.img)"
-        required: false
         default: "recovery.img"
 
 jobs:
   patch:
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -31,53 +28,25 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends curl file cpio gzip lz4 openssl
+          sudo apt-get install -y --no-install-recommends curl file cpio gzip lz4 openssl xz-utils zstd
 
-      - name: Verify local tools
+      # >>> NEW: fetch tools if they aren't in the repo <<<
+      - name: Ensure magiskboot & avbtool
         run: |
           set -euxo pipefail
-          test -x ./magiskboot
-          test -x ./avbtool
+          if ! [[ -x ./magiskboot ]]; then
+            rm -rf AIK
+            git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen AIK
+            cp AIK/AIK-Linux/bin/magiskboot ./magiskboot
+            chmod +x ./magiskboot
+          fi
+          if ! [[ -x ./avbtool ]]; then
+            curl -fL -o avbtool.py https://android.googlesource.com/platform/external/avb/+/refs/heads/master/avbtool.py?format=TEXT
+            base64 -d avbtool.py > avbtool
+            rm avbtool.py
+            chmod +x ./avbtool
+          fi
           ./magiskboot --help >/dev/null
           ./avbtool --help >/dev/null
 
-      - name: Download image
-        env:
-          URL: ${{ inputs.IMAGE_URL }}
-          OUT: ${{ inputs.IMAGE_FILENAME }}
-        run: |
-          set -euxo pipefail
-          curl -fL --retry 5 --retry-delay 2 --connect-timeout 60 -o "$OUT" "$URL"
-          test -s "$OUT"
-          cp -f "$OUT" r.img
-          echo "Downloaded $(stat -c%s r.img) bytes"
-          file r.img || true
-          hexdump -C -n 8 r.img | head -n1 || true
-
-      - name: Generate signing key (phh.pem)
-        run: |
-          set -euxo pipefail
-          [[ -f phh.pem ]] || openssl genrsa -f4 -out phh.pem 4096
-
-      - name: Make scripts executable
-        run: |
-          set -euxo pipefail
-          chmod +x script1.sh script2.sh magiskboot avbtool
-
-      - name: Preflight
-        run: ./script1.sh
-
-      - name: Patch + AVB
-        env:
-          PARTITION_NAME: ${{ inputs.PARTITION_NAME }}
-          PARTITION_SIZE: ${{ inputs.PARTITION_SIZE }}
-        run: ./script2.sh
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: patched-image
-          path: |
-            recovery-patched.img
-            phh.pub.bin
-          if-no-files-found: error
+      - name: Download
