@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       RECOVERY_URL:
-        description: 'Direct download URL to recovery.img (paste the presigned/cloudflare link)'
+        description: 'Direct download URL to recovery.img (your presigned Cloudflare link)'
         required: true
         default: ''
 
@@ -31,7 +31,7 @@ jobs:
           git lfs install
           git lfs pull
 
-      - name: Verify magiskboot (from repo / LFS)
+      - name: Verify magiskboot is present
         run: |
           set -euxo pipefail
           ls -lh || true
@@ -39,56 +39,6 @@ jobs:
           file magiskboot || true
           chmod +x magiskboot
 
-      - name: Get recovery.img
+      - name: Shim hardcoded magiskboot path used by script2.sh
         run: |
           set -euxo pipefail
-          URL="${{ github.event.inputs.RECOVERY_URL }}"
-          # Important: quotes preserve query params like &X-Amz-*
-          curl -fL --retry 5 --retry-delay 2 --connect-timeout 60 -o recovery.img "$URL"
-          ls -lh recovery.img
-          [ -s recovery.img ] || { echo "ERROR: recovery.img is empty"; exit 1; }
-
-      - name: Ensure signing key exists
-        run: |
-          set -euxo pipefail
-          if [ ! -f phh.pem ]; then
-            echo "Generating phh.pem (4096-bit RSA)…"
-            openssl genrsa -f4 -out phh.pem 4096
-          fi
-
-      - name: Patch Process-1
-        run: |
-          set -euxo pipefail
-          chmod +x script1.sh || true
-          ./script1.sh || true
-          ls -lh || true
-
-      - name: Patch Process-2
-        run: |
-          set -euxo pipefail
-          chmod +x script2.sh || true
-          ./script2.sh || true
-
-          # Use the repo's avbtool executable
-          chmod +x avbtool
-          ./avbtool extract_public_key --key phh.pem --output phh.pub.bin
-          ./avbtool add_hash_footer \
-            --partition_name recovery \
-            --partition_size $(wc -c < recovery.img) \
-            --image recovery-patched.img \
-            --key phh.pem \
-            --algorithm SHA256_RSA4096
-
-          mkdir -p output
-          mv recovery-patched.img output/recovery.img
-          (cd output && tar cvf fastbootd-recovery.tar recovery.img)
-          (cd output && md5sum -t fastbootd-recovery.tar >> fastbootd-recovery.tar)
-          mv output/fastbootd-recovery.tar output/fastbootd-recovery.tar.md5
-          ls -lh output || true
-
-      - name: Upload Recovery
-        uses: actions/upload-artifact@v4
-        with:
-          name: Patched-Recovery
-          path: ${{ github.workspace }}/output/*.md5
-          if-no-files-found: warn
