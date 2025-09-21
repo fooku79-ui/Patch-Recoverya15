@@ -4,13 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       RECOVERY_URL:
-        description: 'RECOVERY URL'
-        required: false
+        description: 'Direct download URL to recovery.img (paste the presigned/cloudflare link)'
+        required: true
         default: ''
-
-env:
-  # Fallback if no input given
-  RECOVERY_URL: https://oshi.at/Rpjg
 
 concurrency:
   group: recovery-${{ github.ref }}
@@ -22,34 +18,37 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Check Out
+      - name: Check Out (with LFS)
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
-      - name: Prepare the environment
+      - name: Prepare environment
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y git wget lz4 tar openssl python3
+          sudo apt-get install -y git wget curl lz4 tar unzip openssl python3 file
+          git lfs install
+          git lfs pull
 
-      - name: Resolve RECOVERY_URL
-        id: url
-        run: |
-          set -e
-          if [ -n "${{ github.event.inputs.RECOVERY_URL }}" ]; then
-            echo "URL=${{ github.event.inputs.RECOVERY_URL }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "URL=${RECOVERY_URL}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Fetch image from URL
+      - name: Verify magiskboot (from repo / LFS)
         run: |
           set -euxo pipefail
-          echo "Downloading: ${{ steps.url.outputs.URL }}"
-          wget -O recovery.img "${{ steps.url.outputs.URL }}"
+          ls -lh || true
+          test -f magiskboot || (echo "ERROR: magiskboot not found in repo root"; exit 1)
+          file magiskboot || true
+          chmod +x magiskboot
+
+      - name: Get recovery.img
+        run: |
+          set -euxo pipefail
+          URL="${{ github.event.inputs.RECOVERY_URL }}"
+          # Important: quotes preserve query params like &X-Amz-*
+          curl -fL --retry 5 --retry-delay 2 --connect-timeout 60 -o recovery.img "$URL"
           ls -lh recovery.img
           [ -s recovery.img ] || { echo "ERROR: recovery.img is empty"; exit 1; }
 
-      - name: Ensure key exists
+      - name: Ensure signing key exists
         run: |
           set -euxo pipefail
           if [ ! -f phh.pem ]; then
@@ -60,19 +59,18 @@ jobs:
       - name: Patch Process-1
         run: |
           set -euxo pipefail
-          chmod a+x script1.sh || true
-          chmod a+x magiskboot || true
+          chmod +x script1.sh || true
           ./script1.sh || true
-          ls -lh
+          ls -lh || true
 
       - name: Patch Process-2
         run: |
           set -euxo pipefail
-          chmod a+x script2.sh || true
+          chmod +x script2.sh || true
           ./script2.sh || true
 
           # Use the repo's avbtool executable
-          chmod a+x avbtool
+          chmod +x avbtool
           ./avbtool extract_public_key --key phh.pem --output phh.pub.bin
           ./avbtool add_hash_footer \
             --partition_name recovery \
