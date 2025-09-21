@@ -1,4 +1,4 @@
-name: Patch Recovery (defensive, self-contained)
+name: Patch Recovery (clean)
 
 on:
   workflow_dispatch:
@@ -8,20 +8,20 @@ on:
         required: true
       PARTITION_NAME:
         description: "Partition for AVB footer (recovery or vendor_boot)"
-        default: "recovery"
         required: false
+        default: "recovery"
       PARTITION_SIZE:
         description: "Exact partition size in bytes (optional). Leave blank to auto-round."
         required: false
       IMAGE_FILENAME:
         description: "Save-as filename (recovery.img or vendor_boot.img)"
-        default: "recovery.img"
         required: false
+        default: "recovery.img"
 
 jobs:
   patch:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -31,57 +31,15 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
-            curl ca-certificates python3 file cpio gzip lz4 xz-utils zstd openssl
+          sudo apt-get install -y --no-install-recommends curl file cpio gzip lz4 openssl
 
-      - name: Validate inputs & echo
-        env:
-          IMAGE_URL: ${{ inputs.IMAGE_URL }}
-          PARTITION_NAME: ${{ inputs.PARTITION_NAME }}
-          PARTITION_SIZE: ${{ inputs.PARTITION_SIZE }}
-          IMAGE_FILENAME: ${{ inputs.IMAGE_FILENAME }}
-        run: |
-          set -euo pipefail
-          : "${IMAGE_URL:?INPUT IMAGE_URL is required}"
-          : "${PARTITION_NAME:=recovery}"
-          : "${IMAGE_FILENAME:=recovery.img}"
-          echo "== Inputs =="
-          echo "IMAGE_URL=${IMAGE_URL}"
-          echo "PARTITION_NAME=${PARTITION_NAME}"
-          echo "PARTITION_SIZE=${PARTITION_SIZE:-<auto>}"
-          echo "IMAGE_FILENAME=${IMAGE_FILENAME}"
-
-      - name: Ensure magiskboot/avbtool available (use repo, else fallback)
-        id: tools
+      - name: Verify local tools
         run: |
           set -euxo pipefail
-          ok=1
-          if [[ -x ./magiskboot ]]; then
-            echo "Using repo magiskboot"
-          else
-            ok=0
-          fi
-          if [[ -x ./avbtool ]]; then
-            echo "Using repo avbtool"
-          else
-            ok=0
-          fi
-
-          if [[ "$ok" -eq 0 ]]; then
-            echo "Tools missing; fetching fallbacks…"
-            rm -rf AIK
-            git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen AIK
-            cp AIK/AIK-Linux/bin/magiskboot ./magiskboot
-            chmod +x ./magiskboot
-            # Fetch avbtool (AOSP)
-            curl -fL -o avbtool.py https://android.googlesource.com/platform/external/avb/+/refs/heads/master/avbtool.py?format=TEXT
-            base64 -d avbtool.py > avbtool
-            rm avbtool.py
-            chmod +x ./avbtool
-          fi
-
-          ./magiskboot --help >/dev/null 2>&1 || { echo "magiskboot not runnable"; exit 2; }
-          ./avbtool --help >/dev/null 2>&1 || { echo "avbtool not runnable"; exit 2; }
+          test -x ./magiskboot
+          test -x ./avbtool
+          ./magiskboot --help >/dev/null
+          ./avbtool --help >/dev/null
 
       - name: Download image
         env:
@@ -96,15 +54,18 @@ jobs:
           file r.img || true
           hexdump -C -n 8 r.img | head -n1 || true
 
-      - name: Make scripts executable (if present)
+      - name: Generate signing key (phh.pem)
         run: |
           set -euxo pipefail
-          [[ -f script1.sh ]] && chmod +x script1.sh || true
-          [[ -f script2.sh ]] && chmod +x script2.sh || true
+          [[ -f phh.pem ]] || openssl genrsa -f4 -out phh.pem 4096
+
+      - name: Make scripts executable
+        run: |
+          set -euxo pipefail
+          chmod +x script1.sh script2.sh magiskboot avbtool
 
       - name: Preflight
         run: ./script1.sh
-        continue-on-error: false
 
       - name: Patch + AVB
         env:
@@ -112,7 +73,7 @@ jobs:
           PARTITION_SIZE: ${{ inputs.PARTITION_SIZE }}
         run: ./script2.sh
 
-      - name: Upload artifact (patched image)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: patched-image
@@ -120,6 +81,3 @@ jobs:
             recovery-patched.img
             phh.pub.bin
           if-no-files-found: error
-
-    # If anything fails, still capture a debug snapshot
-    continue-on-error: false
