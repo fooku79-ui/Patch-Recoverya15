@@ -33,25 +33,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             curl ca-certificates python3 python3-pip \
-            cpio gzip lz4 p7zip-full xz-utils zstd file
+            cpio gzip lz4 p7zip-full xz-utils zstd file openssl
 
       - name: Get Android Image Kitchen (for magiskboot)
         run: |
           set -euxo pipefail
           git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen AIK
-          # magiskboot lives in AIK/tools
-          ln -sf "$GITHUB_WORKSPACE/AIK/tools/magiskboot" ./magiskboot
+          # Use the Linux binary shipped in the repo
+          cp AIK/AIK-Linux/bin/magiskboot ./magiskboot
           chmod +x ./magiskboot
+          ./magiskboot --help >/dev/null
 
-      - name: Fetch avbtool.py (AOSP)
+      - name: Get avbtool (AOSP)
         run: |
           set -euxo pipefail
           curl -fL -o avbtool.py https://android.googlesource.com/platform/external/avb/+/refs/heads/master/avbtool.py?format=TEXT
-          # Decode from base64 served by googlesource ?format=TEXT
           base64 -d avbtool.py > avbtool
           rm avbtool.py
           chmod +x avbtool
-          # Smoke check
           ./avbtool --help >/dev/null
 
       - name: Download image
@@ -62,7 +61,6 @@ jobs:
           set -euxo pipefail
           curl -fL --retry 5 --retry-delay 2 --connect-timeout 60 -o "$OUT" "$URL"
           test -s "$OUT"
-          # Normalize to r.img for scripts
           cp -f "$OUT" r.img
           echo "Downloaded $(stat -c%s r.img) bytes"
           file r.img || true
@@ -80,7 +78,7 @@ jobs:
           set -euxo pipefail
           chmod +x script1.sh script2.sh avbtool magiskboot
 
-      - name: Step 1 – preflight (optional)
+      - name: Step 1 – preflight
         run: |
           set -euxo pipefail
           ./script1.sh
