@@ -1,93 +1,103 @@
-name: RECOVERY
+name: Patch Recovery (defensive)
 
 on:
   workflow_dispatch:
     inputs:
-      RECOVERY_URL:
-        description: 'Direct download URL to recovery.img (presigned Cloudflare/transfer.sh/etc.)'
+      IMAGE_URL:
+        description: "HTTP/HTTPS URL to recovery/vendor_boot image"
         required: true
-        default: ''
-
-concurrency:
-  group: recovery-${{ github.ref }}
-  cancel-in-progress: true
+      PARTITION_NAME:
+        description: "Partition name for AVB footer (recovery or vendor_boot)"
+        required: false
+        default: "recovery"
+      PARTITION_SIZE:
+        description: "Exact partition size in bytes (optional). Leave blank to auto-round."
+        required: false
+      IMAGE_FILENAME:
+        description: "Destination filename for downloaded image (recovery.img or vendor_boot.img)"
+        required: false
+        default: "recovery.img"
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+  patch:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
 
     steps:
-      - name: Check Out (with LFS)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          lfs: true
 
-      - name: Prepare environment
+      - name: Install deps
         run: |
           set -euxo pipefail
-          sudo apt-get update -y
-          # add the missing tools magiskboot/cpio flows need
-          sudo apt-get install -y git wget curl lz4 xz-utils cpio tar unzip openssl python3 file
-          git lfs install
-          git lfs pull
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl ca-certificates python3 python3-pip \
+            cpio gzip lz4 p7zip-full xz-utils zstd file
 
-      - name: Verify magiskboot is present
+      - name: Get Android Image Kitchen (for magiskboot)
         run: |
           set -euxo pipefail
-          test -f magiskboot || (echo "ERROR: magiskboot not found in repo root"; exit 1)
-          chmod +x magiskboot
+          git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen AIK
+          # magiskboot lives in AIK/tools
+          ln -sf "$GITHUB_WORKSPACE/AIK/tools/magiskboot" ./magiskboot
+          chmod +x ./magiskboot
 
-      - name: Shim hardcoded magiskboot path used by script2.sh
+      - name: Fetch avbtool.py (AOSP)
         run: |
           set -euxo pipefail
-          mkdir -p /home/runner/work/Patch-Recovery/Patch-Recovery
-          ln -sf "$GITHUB_WORKSPACE/magiskboot" /home/runner/work/Patch-Recovery/Patch-Recovery/magiskboot
-
-      - name: Get recovery.img
-        run: |
-          set -euxo pipefail
-          URL="${{ github.event.inputs.RECOVERY_URL }}"
-          curl -fL --retry 5 --retry-delay 2 --connect-timeout 60 -o recovery.img "$URL"
-          [ -s recovery.img ]
-          # many scripts expect r.img alongside recovery.img
-          cp -f recovery.img r.img
-
-      - name: Ensure signing key exists
-        run: |
-          set -euxo pipefail
-          [ -f phh.pem ] || openssl genrsa -f4 -out phh.pem 4096
-
-      - name: Patch Process-1
-        run: |
-          set -euxo pipefail
-          chmod +x script1.sh || true
-          ./script1.sh || true
-
-      - name: Patch Process-2
-        run: |
-          set -euxo pipefail
-          chmod +x script2.sh || true
-          ./script2.sh || true
-
+          curl -fL -o avbtool.py https://android.googlesource.com/platform/external/avb/+/refs/heads/master/avbtool.py?format=TEXT
+          # Decode from base64 served by googlesource ?format=TEXT
+          base64 -d avbtool.py > avbtool
+          rm avbtool.py
           chmod +x avbtool
-          ./avbtool extract_public_key --key phh.pem --output phh.pub.bin
-          ./avbtool add_hash_footer \
-            --partition_name recovery \
-            --partition_size $(wc -c < recovery.img) \
-            --image recovery-patched.img \
-            --key phh.pem \
-            --algorithm SHA256_RSA4096
+          # Smoke check
+          ./avbtool --help >/dev/null
 
-          mkdir -p output
-          mv -f recovery-patched.img output/recovery.img
-          (cd output && tar cvf fastbootd-recovery.tar recovery.img)
-          (cd output && md5sum -t fastbootd-recovery.tar >> fastbootd-recovery.tar)
-          mv -f output/fastbootd-recovery.tar output/fastbootd-recovery.tar.md5
+      - name: Download image
+        env:
+          URL: ${{ inputs.IMAGE_URL }}
+          OUT: ${{ inputs.IMAGE_FILENAME }}
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 --retry-delay 2 --connect-timeout 60 -o "$OUT" "$URL"
+          test -s "$OUT"
+          # Normalize to r.img for scripts
+          cp -f "$OUT" r.img
+          echo "Downloaded $(stat -c%s r.img) bytes"
+          file r.img || true
+          hexdump -C -n 8 r.img | head -n1 || true
 
-      - name: Upload Recovery
+      - name: Generate signing key (phh.pem)
+        run: |
+          set -euxo pipefail
+          if [ ! -f phh.pem ]; then
+            openssl genrsa -f4 -out phh.pem 4096
+          fi
+
+      - name: Make scripts executable
+        run: |
+          set -euxo pipefail
+          chmod +x script1.sh script2.sh avbtool magiskboot
+
+      - name: Step 1 – preflight (optional)
+        run: |
+          set -euxo pipefail
+          ./script1.sh
+
+      - name: Step 2 – unpack, patch, repack, AVB
+        env:
+          PARTITION_NAME: ${{ inputs.PARTITION_NAME }}
+          PARTITION_SIZE: ${{ inputs.PARTITION_SIZE }}
+        run: |
+          set -euxo pipefail
+          ./script2.sh
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Patched-Recovery
-          path: ${{ github.workspace }}/output/*
+          name: patched-image
+          path: |
+            recovery-patched.img
+            phh.pub.bin
           if-no-files-found: error
