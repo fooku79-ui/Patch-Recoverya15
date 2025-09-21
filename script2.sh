@@ -1,27 +1,129 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-mkdir unpack
-cd unpack
-../magiskboot unpack ../r.img
-../magiskboot cpio ramdisk.cpio extract
-# Reverse fastbootd ENG mode check
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery e10313aaf40300aa6ecc009420010034 e10313aaf40300aa6ecc0094 # 20 01 00 35
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery eec3009420010034 eec3009420010035
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 3ad3009420010034 3ad3009420010035
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 50c0009420010034 50c0009420010035
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 080109aae80000b4 080109aae80000b5
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 20f0a6ef38b1681c 20f0a6ef38b9681c
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 23f03aed38b1681c 23f03aed38b9681c
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 20f09eef38b1681c 20f09eef38b9681c
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 26f0ceec30b1681c 26f0ceec30b9681c
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 24f0fcee30b1681c 24f0fcee30b9681c
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 27f02eeb30b1681c 27f02eeb30b9681c
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery b4f082ee28b1701c b4f082ee28b970c1
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 9ef0f4ec28b1701c 9ef0f4ec28b9701c
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 9ef00ced28b1701c 9ef00ced28b9701c
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 2001597ae0000054 2001597ae1000054  # ccmp w9, w25, #0, eq ; b.e #0x20 ===> b.ne #0x20
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 24f0f2ea30b1681c 24f0f2ea30b9681c
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot hexpatch system/bin/recovery 41010054a0020012f44f48a9 4101005420008052f44f48a9
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot cpio ramdisk.cpio 'add 0755 system/bin/recovery system/bin/recovery'
-~runner/work/Patch-Recovery/Patch-Recovery/magiskboot repack ../r.img new-boot.img
-cp new-boot.img ../recovery-patched.img
+# Inputs:
+#   r.img (already present)
+#   phh.pem (RSA key)
+#   ./magiskboot and ./avbtool (executable)
+# Env (optional):
+#   PARTITION_NAME (default: recovery)
+#   PARTITION_SIZE (exact bytes; optional — else auto-round ≥ file size)
+
+PARTITION_NAME="${PARTITION_NAME:-recovery}"
+PARTITION_SIZE="${PARTITION_SIZE:-}"
+
+WORK=./d
+rm -rf "$WORK"
+mkdir -p "$WORK"
+pushd "$WORK" >/dev/null
+
+echo "==> Unpacking ../r.img"
+../magiskboot unpack ../r.img || {
+  echo "ERROR: magiskboot failed to parse r.img. Is this actually a boot/vendor_boot/recovery image?"
+  exit 10
+}
+
+echo "==> Inspecting unpack results"
+ls -lah || true
+
+# Detect ramdisk payload (classic/vendor/compressed)
+RAMDISK=""
+if [[ -f ramdisk.cpio ]]; then
+  RAMDISK="ramdisk.cpio"
+elif comp=$(ls ramdisk.cpio.* 2>/dev/null | head -n1); then
+  RAMDISK="$comp"
+elif comp=$(ls vendor_ramdisk/*recovery*.cpio* 2>/dev/null | head -n1); then
+  RAMDISK="$comp"
+elif comp=$(ls vendor_ramdisk/*.cpio* 2>/dev/null | head -n1); then
+  RAMDISK="$comp"
+fi
+
+if [[ -z "${RAMDISK}" ]]; then
+  echo "ERROR: No ramdisk found. This device might use recovery-as-boot or a separate vendor_boot without a classic ramdisk."
+  echo "Files present:"
+  find . -maxdepth 2 -type f -printf '%P\n' | sort
+  # Still try repack (some images repack even if ramdisk-less)
+  echo "Attempting repack anyway..."
+else
+  echo "==> Found ramdisk payload: ${RAMDISK}"
+
+  TMPRD=./_rd
+  rm -rf "$TMPRD"; mkdir "$TMPRD"
+
+  case "$RAMDISK" in
+    *.gz)  gzip -dc "$RAMDISK" | (cd "$TMPRD" && cpio -idm --no-absolute-filenames) ;;
+    *.lz4) lz4 -dq "$RAMDISK" - | (cd "$TMPRD" && cpio -idm --no-absolute-filenames) ;;
+    *.cpio) (cd "$TMPRD" && cpio -idm --no-absolute-filenames < "../$RAMDISK") ;;
+    *) echo "WARN: Unknown ramdisk format; attempting raw cpio extract"
+       (cd "$TMPRD" && cpio -idm --no-absolute-filenames < "../$RAMDISK") || true ;;
+  esac
+
+  # === Place your actual modifications here ===
+  # (Examples commented out — uncomment to use)
+  # if [[ -f "$TMPRD/default.prop" ]]; then
+  #   echo "persist.example.flag=1" >> "$TMPRD/default.prop" || true
+  # fi
+
+  echo "==> Repacking ramdisk"
+  case "$RAMDISK" in
+    *.gz)
+      (cd "$TMPRD" && find . | cpio -o -H newc | gzip -9) > ramdisk.cpio.gz
+      mv -f ramdisk.cpio.gz .
+      ;;
+    *.lz4)
+      (cd "$TMPRD" && find . | cpio -o -H newc) | lz4 -q -l -9 - ramdisk.cpio.lz4
+      mv -f ramdisk.cpio.lz4 .
+      ;;
+    *.cpio)
+      (cd "$TMPRD" && find . | cpio -o -H newc) > ramdisk.cpio
+      mv -f ramdisk.cpio .
+      ;;
+  esac
+fi
+
+echo "==> Repacking full image (magiskboot repack)"
+../magiskboot repack ../r.img || {
+  echo "ERROR: repack failed."
+  exit 20
+}
+
+if [[ ! -f new-boot.img ]]; then
+  echo "ERROR: repack did not produce new-boot.img"
+  exit 21
+fi
+
+# Normalize name
+mv -f new-boot.img ../recovery-patched.img
+popd >/dev/null
+
+echo "==> Patched image at ./recovery-patched.img"
+test -s recovery-patched.img
+
+# === AVB footer ===
+SIZE=$(stat -c%s recovery-patched.img)
+if [[ -n "$PARTITION_SIZE" ]]; then
+  ROUND="$PARTITION_SIZE"
+  if (( SIZE > ROUND )); then
+    echo "ERROR: Patched image ($SIZE) exceeds provided PARTITION_SIZE ($ROUND)."
+    exit 30
+  fi
+else
+  # Round up to nearest 4MiB block
+  ROUND=$(( ((SIZE + 4194303) / 4194304) * 4194304 ))
+fi
+
+echo "Image size: $SIZE bytes, using partition_size: $ROUND"
+echo "Partition name: $PARTITION_NAME"
+
+# Public key (optional but handy to keep)
+./avbtool extract_public_key --key phh.pem --output phh.pub.bin
+
+./avbtool add_hash_footer \
+  --image recovery-patched.img \
+  --partition_name "$PARTITION_NAME" \
+  --partition_size "$ROUND" \
+  --key phh.pem \
+  --algorithm SHA256_RSA4096
+
+echo "==> AVB hash footer added."
+echo "Done."
