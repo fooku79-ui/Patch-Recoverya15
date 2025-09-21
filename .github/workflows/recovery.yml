@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       RECOVERY_URL:
-        description: 'Direct download URL to recovery.img (presigned Cloudflare/file.io/transfer.sh)'
+        description: 'Direct download URL to recovery.img (presigned Cloudflare/transfer.sh/etc.)'
         required: true
         default: ''
 
@@ -27,7 +27,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          # add cpio/xz/lz4 which some magiskboot flows rely on
+          # add the missing tools magiskboot/cpio flows need
           sudo apt-get install -y git wget curl lz4 xz-utils cpio tar unzip openssl python3 file
           git lfs install
           git lfs pull
@@ -43,46 +43,33 @@ jobs:
           set -euxo pipefail
           mkdir -p /home/runner/work/Patch-Recovery/Patch-Recovery
           ln -sf "$GITHUB_WORKSPACE/magiskboot" /home/runner/work/Patch-Recovery/Patch-Recovery/magiskboot
-          ls -l /home/runner/work/Patch-Recovery/Patch-Recovery/magiskboot
 
       - name: Get recovery.img
         run: |
           set -euxo pipefail
           URL="${{ github.event.inputs.RECOVERY_URL }}"
           curl -fL --retry 5 --retry-delay 2 --connect-timeout 60 -o recovery.img "$URL"
-          ls -lh recovery.img
-          [ -s recovery.img ] || { echo "ERROR: recovery.img is empty"; exit 1; }
+          [ -s recovery.img ]
           # many scripts expect r.img alongside recovery.img
           cp -f recovery.img r.img
 
       - name: Ensure signing key exists
         run: |
           set -euxo pipefail
-          if [ ! -f phh.pem ]; then
-            openssl genrsa -f4 -out phh.pem 4096
-          fi
+          [ -f phh.pem ] || openssl genrsa -f4 -out phh.pem 4096
 
       - name: Patch Process-1
         run: |
           set -euxo pipefail
           chmod +x script1.sh || true
           ./script1.sh || true
-          ls -lh || true
 
-      - name: Patch Process-2 (with fallback)
+      - name: Patch Process-2
         run: |
           set -euxo pipefail
           chmod +x script2.sh || true
-          # don't fail the job if script2 errors; we'll handle fallback
-          ./script2.sh || echo "script2.sh reported errors; will check for output and fallback if needed"
+          ./script2.sh || true
 
-          # If script2 didn't produce recovery-patched.img, fall back to original image
-          if [ ! -f recovery-patched.img ]; then
-            echo "No recovery-patched.img produced; using original recovery.img as patched base."
-            cp -f recovery.img recovery-patched.img
-          fi
-
-          # avbtool from repo
           chmod +x avbtool
           ./avbtool extract_public_key --key phh.pem --output phh.pub.bin
           ./avbtool add_hash_footer \
@@ -97,11 +84,6 @@ jobs:
           (cd output && tar cvf fastbootd-recovery.tar recovery.img)
           (cd output && md5sum -t fastbootd-recovery.tar >> fastbootd-recovery.tar)
           mv -f output/fastbootd-recovery.tar output/fastbootd-recovery.tar.md5
-
-      - name: Debug build dir
-        run: |
-          echo "=== Workspace ==="; ls -lh $GITHUB_WORKSPACE || true
-          echo "=== Output dir ==="; ls -lh $GITHUB_WORKSPACE/output || true
 
       - name: Upload Recovery
         uses: actions/upload-artifact@v4
